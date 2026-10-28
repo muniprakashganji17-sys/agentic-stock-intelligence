@@ -28,6 +28,28 @@ MIN_MENTIONS = 3
 TOP_PER_DAY = 15
 MAX_TOTAL_GB = 800          # refuse to run if the 8-year scan would exceed this
 
+# Auto-generated "fund X bought shares of Y" sites (checked by reading sample headlines).
+SPAM_SOURCES = {
+    "dailypolitical.com", "defenseworld.net", "etfdailynews.com", "tickerreport.com",
+    "themarketsdaily.com", "wkrb13.com", "theenterpriseleader.com", "ledgergazette.com",
+    "bangaloreweekly.com", "huronreport.com", "mmahotstuff.com",
+}
+# Template headlines: "... nasdaqmsft", "... nysexom", or "stake/position/shares ... llc/advisors".
+EXCHANGE_TAG = r"\b(?:nasdaq|nyse)[a-z]{1,5}\b"
+HOLDINGS = (r"\b(?:stake|position|holdings?|shares)\b.*"
+            r"\b(?:llc|lp|advisors?|advisory|wealth|asset management|investment management|capital management)\b")
+
+# Auto-generated "fund X cuts holdings in Y" posts and hedge-fund listicles (checked by reading
+# sample headlines). They carry almost no information and crowd out real news.
+BLOCKED_SOURCES = {
+    "dailypolitical.com", "etfdailynews.com", "defenseworld.net", "wkrb13.com",
+    "tickerreport.com", "themarketsdaily.com", "theenterpriseleader.com",
+    "ledgergazette.com", "bangaloreweekly.com", "huronreport.com", "mmahotstuff.com",
+    "insidermonkey.com",
+}
+# Template headlines have the exchange glued to the ticker: "exxon mobil co nysexom"
+SPAM_HEADLINE = r"\b(?:nasdaq|nyse)[a-z]{1,5}\b"
+
 # Names as GDELT writes them (lower-case compared). Observed: "Exxonmobil", "Jpmorgan Chase Co".
 ALIASES = {
     "AAPL": ["apple", "apple inc"],
@@ -88,6 +110,19 @@ def process(raw):
     df["effective_date"] = eff + pd.offsets.BDay(0)         # weekend -> Monday
     df["tone"] = pd.to_numeric(df["tone"].astype(str).str.split(",").str[0], errors="coerce")
     df["headline"] = df["url"].map(_slug_to_headline)
+
+    # drop template spam, then keep only the FIRST sighting of each URL (GDELT re-lists some)
+    src = df["source"].str.lower().str.replace(r"^www\.", "", regex=True)
+    spam = (src.isin(SPAM_SOURCES) | df["headline"].str.contains(EXCHANGE_TAG, regex=True)
+            | df["headline"].str.contains(HOLDINGS, regex=True))
+    df = df[~spam].sort_values("seen_utc").drop_duplicates("url")
+
+    # same article re-recorded on later days: keep the EARLIEST sighting only
+    df = df.sort_values("seen_utc").drop_duplicates("url", keep="first")
+    # template spam: blocked sites, or the glued "nasdaqmsft" headline pattern
+    spam = (df["source"].str.lower().isin(BLOCKED_SOURCES)
+            | df["headline"].str.contains(SPAM_HEADLINE, regex=True))
+    df = df[~spam]
 
     df["_key"] = df["headline"].str[:60].where(df["headline"] != "", df["url"])
     df = df.sort_values("mentions", ascending=False)
