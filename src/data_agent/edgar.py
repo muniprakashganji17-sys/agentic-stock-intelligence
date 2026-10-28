@@ -73,8 +73,7 @@ def list_filings(ticker, cik):
     for extra in sub["filings"].get("files", []):          # older filings live in extra files
         if extra["filingTo"] >= config.START_DATE and extra["filingFrom"] <= config.END_DATE:
             frames.append(pd.DataFrame(_get_json(f"https://data.sec.gov/submissions/{extra['name']}")))
-
-       frames = [f for f in frames if not f.empty]           # avoids pandas FutureWarning
+    frames = [f for f in frames if not f.empty]           # avoids pandas FutureWarning
     if not frames:
         raise ValueError(f"{ticker}: SEC returned no filings for CIK {cik}")
     with warnings.catch_warnings():
