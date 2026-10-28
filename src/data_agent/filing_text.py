@@ -18,19 +18,23 @@ costs the last few filings. Rerunning continues where it stopped.
 import os
 import re
 import time
+import warnings
 
 import pandas as pd
 import requests
-from bs4 import BeautifulSoup
+from bs4 import BeautifulSoup, XMLParsedAsHTMLWarning
 
 import config
 from src.data_agent.edgar import _headers
+
+# modern filings start with an XML declaration; the HTML parser handles them fine
+warnings.filterwarnings("ignore", category=XMLParsedAsHTMLWarning)
 
 PAUSE = 0.2            # seconds between requests
 MAX_CHARS = 150_000    # keep at most this much text per document
 SAVE_EVERY = 25
 MAX_FAILS_IN_A_ROW = 5
-EXHIBIT_RE = re.compile(r"(?:^|[^a-z])(?:ex|exhibit)[-_]?0?99", re.I)
+EXHIBIT_RE = re.compile(r"(?:ex|exhibit)[-_]?0?99", re.I)   # a8-kex991.htm, msft-ex99_1.htm, ...
 SKIP_RE = re.compile(r"^R\d+\.htm$|index|FilingSummary|\.xml$|\.xsd$", re.I)
 
 
@@ -80,9 +84,12 @@ def pick_exhibit(files, main_doc, items):
             except ValueError:
                 size = 0
             cands.append((name, size))
-    for name, _ in cands:                       # normal case: file name says exhibit 99
-        if EXHIBIT_RE.search(name):
-            return name
+    named = [n for n, _ in cands if EXHIBIT_RE.search(n)]
+    if named:                                   # normal case: file name says exhibit 99
+        def number(n):                          # ex991 / ex99_1 / ex99-1 -> 1 ; ex992 -> 2
+            m = re.search(r"(?:ex|exhibit)[-_]?0?99[._-]?0?(\d+)", n, re.I)
+            return int(m.group(1)) if m else 1
+        return min(named, key=lambda n: (number(n), n))
     if "2.02" in str(items) and cands:          # e.g. NVIDIA names it q4fy24pr.htm
         name, size = max(cands, key=lambda c: c[1])
         if size > 5000:
@@ -144,7 +151,7 @@ def run(tickers=None, limit=None, force=False):
             have.to_parquet(path, index=False)
 
     # combine all tickers with the index columns (effective_date etc.)
-    parts = [pd.read_parquet(_cache_path(t)) for t in (tickers or config.TICKERS) if os.path.exists(_cache_path(t))]
+    parts = [pd.read_parquet(_cache_path(t)) for t in config.TICKERS if os.path.exists(_cache_path(t))]
     text = pd.concat(parts, ignore_index=True)
     meta = eight_k[["ticker", "accession", "form", "filing_date", "effective_date", "items", "url"]]
     out = meta.merge(text, on="accession", how="inner").sort_values(["ticker", "filing_date"]).reset_index(drop=True)
