@@ -20,6 +20,11 @@ import config
 
 FORMS = {"10-K", "10-Q", "8-K"}
 PAUSE = 0.2   # seconds between requests (SEC limit is 10 per second)
+
+# Exxon moved to a new holding company in 2026 (new CIK 2115436, filings from
+# July 2026 only). All 2018-2025 filings stay under the original Exxon Mobil
+# Corp number, so we point XOM there. Mention this in the final report.
+CIK_OVERRIDES = {"XOM": 34088}
 KEEP = ["accessionNumber", "filingDate", "reportDate", "acceptanceDateTime",
         "form", "items", "primaryDocument", "primaryDocDescription"]
 
@@ -63,10 +68,14 @@ def list_filings(ticker, cik):
     """All 10-K / 10-Q / 8-K filings for one company inside our date window."""
     sub = _get_json(f"https://data.sec.gov/submissions/CIK{cik:010d}.json")
     frames = [pd.DataFrame(sub["filings"]["recent"])]
+    print(f"  {ticker}: CIK {cik} = {sub.get('name')}")
     for extra in sub["filings"].get("files", []):          # older filings live in extra files
         if extra["filingTo"] >= config.START_DATE and extra["filingFrom"] <= config.END_DATE:
             frames.append(pd.DataFrame(_get_json(f"https://data.sec.gov/submissions/{extra['name']}")))
 
+    frames = [f for f in frames if not f.empty]           # avoids pandas FutureWarning
+    if not frames:
+        raise ValueError(f"{ticker}: SEC returned no filings for CIK {cik}")
     df = pd.concat(frames, ignore_index=True).reindex(columns=KEEP)
     df = df[df["form"].isin(FORMS)]
     df = df[(df["filingDate"] >= config.START_DATE) & (df["filingDate"] <= config.END_DATE)]
@@ -101,12 +110,15 @@ def run(force=False):
                 cik_map = ticker_to_cik()
             if ticker not in cik_map:
                 raise ValueError(f"No SEC company number found for {ticker}")
-            df = list_filings(ticker, cik_map[ticker])
+            cik = CIK_OVERRIDES.get(ticker, cik_map[ticker])
+            df = list_filings(ticker, cik)
+            if df.empty:
+                raise ValueError(f"{ticker}: 0 filings in {config.START_DATE} to {config.END_DATE}")
             df.to_csv(path, index=False)
             print(f"  {ticker}: downloaded index of {len(df)} filings")
         frames.append(df)
 
-    filings = pd.concat(frames, ignore_index=True)
+    filings = pd.concat([f for f in frames if not f.empty], ignore_index=True)
     print(filings.groupby(["ticker", "form"]).size().unstack(fill_value=0))
     out = os.path.join(config.PROCESSED_DIR, "filings.parquet")
     filings.to_parquet(out, index=False)
