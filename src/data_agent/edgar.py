@@ -12,6 +12,7 @@ prediction made at the close may use the filing. A filing accepted after the
 """
 import os
 import time
+import warnings
 
 import pandas as pd
 import requests
@@ -76,7 +77,9 @@ def list_filings(ticker, cik):
     frames = [f for f in frames if not f.empty]           # avoids pandas FutureWarning
     if not frames:
         raise ValueError(f"{ticker}: SEC returned no filings for CIK {cik}")
-    df = pd.concat(frames, ignore_index=True).reindex(columns=KEEP)
+       with warnings.catch_warnings():
+        warnings.simplefilter("ignore", FutureWarning)   # harmless: some SEC files have empty columns
+        df = pd.concat(frames, ignore_index=True).reindex(columns=KEEP)
     df = df[df["form"].isin(FORMS)]
     df = df[(df["filingDate"] >= config.START_DATE) & (df["filingDate"] <= config.END_DATE)]
     df = df.drop_duplicates(subset="accessionNumber").copy()
