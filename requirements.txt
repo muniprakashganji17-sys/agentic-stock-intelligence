@@ -1,0 +1,16 @@
+pandas
+numpy
+scikit-learn
+xgboost
+statsmodels
+requests
+beautifulsoup4
+lxml
+python-dotenv
+pyarrow
+fredapi
+yfinance
+streamlit
+plotly
+matplotlib
+ollama
