@@ -1,4 +1,4 @@
-"""Phase 2.3 (step 1): ARIMA baseline for NEXT-DAY DIRECTION.
+"""Phase 2.3: ARIMA baselines - NEXT-DAY DIRECTION (step 1) and NEXT-WEEK VOLATILITY (step 2).
 
 Idea in simple words
   ARIMA looks only at a stock's own past daily returns and predicts tomorrow's return.
@@ -10,6 +10,9 @@ How we keep it honest
      validation year. On day t it sees returns up to day t only and forecasts day t+1.
      (It is not refitted every day - that keeps it fast and leak-free.)
   3. Scored on the same validation rows as price_ml.py, so the tables can be compared.
+  Volatility (step 2): the same idea on the series log("volatility of the last 5 days").
+  Params are fitted on TRAIN only and frozen; on each day t the model forecasts 5 days ahead,
+  which is exactly the span of the target y_vol (days t+1 ... t+5).
   The TEST years are locked: eval_split='test' is refused unless confirm_test=True.
 """
 import os
@@ -21,7 +24,8 @@ from sklearn.metrics import roc_auc_score
 from statsmodels.tsa.arima.model import ARIMA
 
 import config
-from src.baselines.price_ml import direction_scores
+from src.baselines.price_ml import direction_scores, volatility_scores
+from src.forecasting import features as F
 
 ORDER_GRID = [(p, 0, q) for p in range(3) for q in range(3)]   # d=0: returns are already "differenced"
 
@@ -81,6 +85,61 @@ def score_direction(df, fc, eval_split="val"):
     return pd.DataFrame({"arima": s}).T.round(3), ev
 
 
+# ---------------------------------------------------------------------------------------------
+# Step 2: next-week volatility
+# ---------------------------------------------------------------------------------------------
+def forecast_volatility(prices, eval_split="val", confirm_test=False):
+    """For every ticker: forecast of volatility over days t+1..t+5, made at the close of day t.
+
+    Series modelled: z_t = log( sqrt(mean of the last 5 squared daily log returns) * sqrt(252) ),
+    i.e. the same recipe as the target y_vol but looking BACKWARD. Order is chosen by AIC on TRAIN
+    only; the fitted numbers are frozen; on each day t the model sees z up to t and forecasts z(t+5).
+    Returns DataFrame (Ticker, Date, arima_vol, order); arima_vol is in the same units as y_vol.
+    """
+    if eval_split == "test" and not confirm_test:
+        raise RuntimeError("The test years are locked until the very end. Use eval_split='val'.")
+    prices = prices.copy()
+    prices["Date"] = pd.to_datetime(prices["Date"])
+    end = _end_date(eval_split)
+    out = []
+    for tic, g in prices.groupby("Ticker"):
+        g = g.sort_values("Date")
+        r = np.log(g["Close"]).diff()
+        z = np.log(np.sqrt((r ** 2).rolling(F.HORIZON).mean()) * np.sqrt(F.TRADING_DAYS))
+        z.index = g["Date"].to_numpy()
+        z = z.replace([np.inf, -np.inf], np.nan).dropna()
+        z = z[z.index <= end]
+        zv = z.to_numpy()
+        n_train = int((z.index <= pd.Timestamp(config.TRAIN_END)).sum())
+
+        best, best_aic = None, np.inf
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            for order in ORDER_GRID:                            # order chosen on TRAIN only
+                try:
+                    res = ARIMA(zv[:n_train], order=order, trend="c").fit()
+                except Exception:
+                    continue
+                if res.aic < best_aic:
+                    best, best_aic = (order, res), res.aic
+            order, train_res = best
+            preds = np.full(len(zv), np.nan)
+            for i in range(n_train - 1, len(zv)):               # day t = index i: sees zv[:i+1] only
+                frozen = train_res.apply(zv[:i + 1], refit=False)
+                preds[i] = frozen.forecast(F.HORIZON)[-1]       # forecast of z at t+5
+        out.append(pd.DataFrame({"Ticker": tic, "Date": z.index, "arima_vol": np.exp(preds),
+                                 "order": str(order)}))
+    return pd.concat(out, ignore_index=True)
+
+
+def score_volatility(df, fv, eval_split="val"):
+    ev = df[df["split"] == eval_split].merge(fv, on=["Ticker", "Date"], how="left")
+    if ev["arima_vol"].isna().any():
+        raise RuntimeError(f"{ev['arima_vol'].isna().sum()} rows have no ARIMA volatility forecast")
+    s = volatility_scores(ev["y_vol"].to_numpy(), ev["arima_vol"].to_numpy())
+    return pd.DataFrame({"arima": s}).T.round(3), ev
+
+
 def run(eval_split="val"):
     prices = pd.read_parquet(os.path.join(config.PROCESSED_DIR, "prices.parquet"))
     df = pd.read_parquet(os.path.join(config.PROCESSED_DIR, "dataset.parquet"))
@@ -95,4 +154,13 @@ def run(eval_split="val"):
     out_dir = os.path.join(config.DATA_ROOT, "results")
     os.makedirs(out_dir, exist_ok=True)
     table.to_csv(os.path.join(out_dir, f"baseline_direction_arima_{eval_split}.csv"))
+
+    fv = forecast_volatility(prices, eval_split=eval_split)
+    vtable, vev = score_volatility(df, fv, eval_split=eval_split)
+    print("\nVolatility ARIMA order per ticker:")
+    print(fv.groupby("Ticker")["order"].first().to_string())
+    print(f"\n=== ARIMA | next-week volatility | scored on {eval_split} ({len(vev)} rows) ===")
+    print(vtable.to_string())
+    print("(compare: persistence_21d 0.096 / 0.149 / 0.487, xgboost price-only 0.078 / 0.131 / 0.551)")
+    vtable.to_csv(os.path.join(out_dir, f"baseline_volatility_arima_{eval_split}.csv"))
     return None
