@@ -28,16 +28,11 @@ _SIGN = re.compile(r"^\s*signatures?\s*$", re.I)
 
 
 def strip_exhibit_header(text, max_lines=10):
-    """Remove the SEC header lines at the very top (stops at the first real line)."""
+    """Remove SEC page-header lines ("EX-99.1", "2", "file.htm", "Document", "Exhibit 99.1")
+    that appear among the first `max_lines` lines. Later lines are never touched."""
     lines = text.split("\n")
-    i = 0
-    while i < min(len(lines), max_lines):
-        s = lines[i].strip()
-        if s == "" or _BOILER.match(s):
-            i += 1
-        else:
-            break
-    return "\n".join(lines[i:]).strip()
+    head = [ln for ln in lines[:max_lines] if ln.strip() != "" and not _BOILER.match(ln.strip())]
+    return "\n".join(head + lines[max_lines:]).strip()
 
 
 def strip_main(text):
